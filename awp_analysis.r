@@ -1,6 +1,9 @@
 library(dplyr)
 library(ggplot2)
 library(patchwork)
+library(kSamples)
+library(prettyunits)
+
 
 #####################
 # Get rainfall data #
@@ -70,7 +73,8 @@ random_df$date <- as.Date(paste(y, m, 15, sep = "-")) + 30
 
 # Make graph of model rainfall, slope, mean intercept, r2_marginal, r2_conditional, and n over time
 fixed_df = merge(fixed_df, rain_df, by = "date")
-graph_1 <- ggplot(fixed_df, aes(x = date, y = season_rain)) +
+df <- filter(fixed_df, term == "Distance")
+graph_1 <- ggplot(df, aes(x = date, y = season_rain)) +
   geom_col(fill="lightblue") +
   labs(x = '', y = 'Seasonal\n rainfall (mm)') +
   geom_vline(xintercept = as.numeric(as.Date("2010-01-01")), linetype = "dashed", colour = "red") +
@@ -136,8 +140,53 @@ graph <- ggplot() +
   facet_wrap("Paddock", ncol=2, axes="all", axis.labels="margins") +
   theme_classic() +
   theme(strip.background = element_blank()) +
-  theme(legend.position = c(1, 0), legend.justification = c(2, 0), legend.title = element_blank(), legend.key.size=unit(0.3, "cm"))
+  theme(legend.position.inside = c(1, 0), legend.justification = c(2, 0), legend.title = element_blank(), legend.key.size=unit(0.3, "cm"))
 ggsave(paste0(out_dir, "/intercept_timeseries_by_paddock_random_intercept.png"), graph, height = 8, width = 8, dpi = 600)
+
+# Create box plots of before/after conservation for rainfall, slope, mean intercept
+# Use the Anderson-Darling test to see if distributions are statistically similar
+df1 <- filter(fixed_df, term == "Distance")
+df1 <- setNames(subset(df1, select = c("date", "season_rain", "value")), c("date", "Rainfall", "Slope"))
+df2 <- filter(fixed_df, term == "Intercept")
+df2 <- setNames(subset(df2, select = c("date", "value")), c("date", "Intercept"))
+
+df <- merge(df1, df2, by = "date")
+df$Conservation <- NA
+df$Conservation[df$date < as.Date("2010-01-01")] <- "Before"
+df$Conservation[df$date >= as.Date("2010-01-01")] <- "After"
+df$Conservation <- factor(df$Conservation , levels=c("Before", "After"))
+
+ad_rain <- ad.test(df$Rainfall[df$Conservation == "Before"], df$Rainfall[df$Conservation == "After"], method="exact")
+p_rain <- ad_rain$ad[1, 3]
+
+box_1 <- ggplot(df, aes(x = Conservation, y = Rainfall, fill = Conservation)) +
+  geom_boxplot(fill = "grey80", show.legend = FALSE) +
+  labs(title = expr(paste(italic('p ='), !!pretty_p_value(p_rain), sep=""))) +
+  theme_classic() +
+  theme(plot.title = element_text(size=8, hjust = 0.5))
+
+ad_slope <- ad.test(df$Slope[df$Conservation == "Before"], df$Slope[df$Conservation == "After"], method="exact")
+p_slope <- ad_slope$ad[1, 3]
+
+box_2 <- ggplot(df, aes(x = Conservation, y = Slope, fill = Conservation)) +
+  geom_boxplot(fill = "grey80", show.legend = FALSE) +
+  labs(title = expr(paste(italic('p '), !!pretty_p_value(p_slope), sep=""))) +
+  theme_classic() +
+  theme(plot.title = element_text(size=8, hjust = 0.5))
+
+ad_intercept <- ad.test(df$Intercept[df$Conservation == "Before"], df$Intercept[df$Conservation == "After"], method="exact")
+p_intercept <- ad_intercept$ad[1, 3]
+
+box_3 <- ggplot(df, aes(x = Conservation, y = Intercept, fill = Conservation)) +
+  geom_boxplot(fill = "grey80", show.legend = FALSE) +
+  labs(title = expr(paste(italic('p '), !!pretty_p_value(p_intercept), sep=""))) +
+  theme_classic() +
+  theme(plot.title = element_text(size=8, hjust = 0.5))
+
+combined_2 <- (box_1 + box_2 + box_3) +
+  plot_layout(ncol = 3, axis_titles = "collect")
+
+ggsave(paste0(out_dir, "/boxplot_random_intercept.png"), combined_2, height = 2, width = 6, dpi = 600)
 
 #####################################################
 # Analyse the model with random intercept and slope #
@@ -228,3 +277,53 @@ graph <- ggplot(df, aes(x = date, y = value)) +
   theme_classic() +
   theme(strip.background = element_blank())
 ggsave(paste0(out_dir, "/intercept_timeseries_by_paddock_random_intercept_and_slope.png"), graph, height = 8, width = 8, dpi = 600)
+
+# Create box plots of before/after conservation for slope and intercept by paddock
+# Use the Anderson-Darling test to see if distributions are statistically similar
+df1 <- filter(values_df, effect == "Distance")
+df1 <- setNames(subset(df1, select = c("date", "Paddock", "value")), c("date", "Paddock", "Slope"))
+df2 <- filter(values_df, effect == "Intercept")
+df2 <- setNames(subset(df2, select = c("date", "Paddock", "value")), c("date", "Paddock", "Intercept"))
+df <- merge(df1, df2, by = c("date", "Paddock"))
+df$Conservation <- NA
+df$Conservation[df$date < as.Date("2010-01-01")] <- "Before"
+df$Conservation[df$date >= as.Date("2010-01-01")] <- "After"
+df$Conservation <- factor(df$Conservation , levels=c("Before", "After"))
+
+paddock_list <- unique(df$Paddock)
+
+p_df <- data.frame(Paddock = character(), p_value = numeric())
+for (paddock in paddock_list){
+  ad_slope <- ad.test(df$Slope[df$Conservation == "Before" & df$Paddock == as.symbol(paddock)],
+                     df$Slope[df$Conservation == "After" & df$Paddock == as.symbol(paddock)], method="exact")
+  p <- ad_slope$ad[1, 3]
+  p_df <- rbind(p_df, data.frame(Paddock = paddock, p_value = pretty_p_value(p)))
+}
+
+p_labs <- paste0(p_df$Paddock, "\n(", p_df$p_value, ")")
+names(p_labs) <- p_df$Paddock
+
+box <- ggplot() +
+  geom_boxplot(aes(x = Conservation, y = Slope, fill = Conservation), data = df, fill = "grey80", show.legend = FALSE) +
+  facet_wrap("Paddock", ncol=5, axes="all", axis.labels="margins", scales="free_y", labeller = labeller(Paddock = p_labs)) +
+  theme_classic() +
+  theme(strip.background = element_blank())
+ggsave(paste0(out_dir, "/boxplot_slope_by_paddock.png"), box, height = 6, width = 8, dpi = 600)
+
+p_df <- data.frame(Paddock = character(), p_value = numeric())
+for (paddock in paddock_list){
+  ad_intercept <- ad.test(df$Intercept[df$Conservation == "Before" & df$Paddock == as.symbol(paddock)],
+                          df$Intercept[df$Conservation == "After" & df$Paddock == as.symbol(paddock)], method="exact")
+  p <- ad_intercept$ad[1, 3]
+  p_df <- rbind(p_df, data.frame(Paddock = paddock, p_value = pretty_p_value(p)))
+}
+
+p_labs <- paste0(p_df$Paddock, "\n(", p_df$p_value, ")")
+names(p_labs) <- p_df$Paddock
+
+box <- ggplot(df, aes(x = Conservation, y = Intercept, fill = Conservation)) +
+  geom_boxplot(fill = "grey80", show.legend = FALSE) +
+  facet_wrap("Paddock", ncol=5, axes="all", axis.labels="margins", scales="free_y", labeller = labeller(Paddock = p_labs)) +
+  theme_classic() +
+  theme(strip.background = element_blank())
+ggsave(paste0(out_dir, "/boxplot_intercept_by_paddock.png"), box, height = 6, width = 8, dpi = 600)
